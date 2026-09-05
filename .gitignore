@@ -1,0 +1,4 @@
+_deps/
+build-output/
+dist/
+*.log

@@ -1,0 +1,121 @@
+diff --git a/release/src-rt-6.x.4708/linux/linux-2.6.36/net/ipv4/ip_gre.c b/release/src-rt-6.x.4708/linux/linux-2.6.36/net/ipv4/ip_gre.c
+index 35c93e8b6..157e643ba 100644
+--- a/release/src-rt-6.x.4708/linux/linux-2.6.36/net/ipv4/ip_gre.c
++++ b/release/src-rt-6.x.4708/linux/linux-2.6.36/net/ipv4/ip_gre.c
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/capability.h>
+ #include <linux/module.h>
++#include <linux/kallsyms.h>
+ #include <linux/types.h>
+ #include <linux/kernel.h>
+ #include <linux/slab.h>
+@@ -765,7 +766,11 @@ static netdev_tx_t ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev
+ 		skb_dst(skb)->ops->update_pmtu(skb_dst(skb), mtu);
+ 
+ 	if (skb->protocol == htons(ETH_P_IP)) {
+-		df |= (old_iph->frag_off&htons(IP_DF));
++		/* ASUS RT-AC68U SLH GRETAP: with nopmtudisc on an Ethernet tunnel,
++		 * do not copy the inner IPv4 DF bit to the outer GRE packet.
++		 * This permits outer-only fragmentation while preserving the inner frame. */
++		if (dev->type != ARPHRD_ETHER || (tiph->frag_off & htons(IP_DF)))
++			df |= (old_iph->frag_off&htons(IP_DF));
+ 
+ 		if ((old_iph->frag_off&htons(IP_DF)) &&
+ 		    mtu < ntohs(old_iph->tot_len)) {
+@@ -1653,16 +1658,65 @@ static struct rtnl_link_ops ipgre_tap_ops __read_mostly = {
+  *	And now the modules code and kernel interface.
+  */
+ 
++/* ASUS RT-AC68U / Merlin 386.14_2 PPTP coexistence shim. */
++#define ASUS_PPTP_PROTO_ADDR      0xc03da258UL
++#define ASUS_PPTP_RCV_ADDR        0xc01c100cUL
++#define ASUS_PPTP_INIT_ADDR       0xc001e0e0UL
++#define ASUS_INET_ADD_ADDR        0xc023d5c8UL
++#define ASUS_INET_DEL_ADDR        0xc023d580UL
++
++static const struct net_protocol *asus_pptp_proto =
++	(const struct net_protocol *)ASUS_PPTP_PROTO_ADDR;
++static int asus_pptp_displaced;
++
++static int asus_displace_pptp_gre(void)
++{
++	if (kallsyms_lookup_name("pptp_rcv") != ASUS_PPTP_RCV_ADDR ||
++	    kallsyms_lookup_name("pptp_init_module") != ASUS_PPTP_INIT_ADDR ||
++	    kallsyms_lookup_name("inet_add_protocol") != ASUS_INET_ADD_ADDR ||
++	    kallsyms_lookup_name("inet_del_protocol") != ASUS_INET_DEL_ADDR) {
++		printk(KERN_ERR "ipgre-asus: kernel layout guard failed; refusing load\n");
++		return -ENODEV;
++	}
++
++	if (inet_del_protocol(asus_pptp_proto, IPPROTO_GRE) < 0) {
++		printk(KERN_ERR "ipgre-asus: GRE/47 is not owned by expected PPTP handler\n");
++		return -EBUSY;
++	}
++
++	asus_pptp_displaced = 1;
++	printk(KERN_INFO "ipgre-asus: temporarily displaced built-in PPTP GRE handler\n");
++	return 0;
++}
++
++static void asus_restore_pptp_gre(void)
++{
++	if (!asus_pptp_displaced)
++		return;
++
++	if (inet_add_protocol(asus_pptp_proto, IPPROTO_GRE) < 0) {
++		printk(KERN_ERR "ipgre-asus: CRITICAL: failed to restore PPTP GRE handler\n");
++		return;
++	}
++
++	asus_pptp_displaced = 0;
++	printk(KERN_INFO "ipgre-asus: restored built-in PPTP GRE handler\n");
++}
++
+ static int __init ipgre_init(void)
+ {
+ 	int err;
+ 
+-	printk(KERN_INFO "GRE over IPv4 tunneling driver\n");
++	printk(KERN_INFO "GRE over IPv4 tunneling driver (ASUS PPTP/DF patched)\n");
+ 
+ 	err = register_pernet_device(&ipgre_net_ops);
+ 	if (err < 0)
+ 		return err;
+ 
++	err = asus_displace_pptp_gre();
++	if (err < 0)
++		goto displace_failed;
++
+ 	err = inet_add_protocol(&ipgre_protocol, IPPROTO_GRE);
+ 	if (err < 0) {
+ 		printk(KERN_INFO "ipgre init: can't add protocol\n");
+@@ -1677,16 +1731,17 @@ static int __init ipgre_init(void)
+ 	if (err < 0)
+ 		goto tap_ops_failed;
+ 
+-out:
+-	return err;
++	return 0;
+ 
+ tap_ops_failed:
+ 	rtnl_link_unregister(&ipgre_link_ops);
+ rtnl_link_failed:
+ 	inet_del_protocol(&ipgre_protocol, IPPROTO_GRE);
+ add_proto_failed:
++	asus_restore_pptp_gre();
++displace_failed:
+ 	unregister_pernet_device(&ipgre_net_ops);
+-	goto out;
++	return err;
+ }
+ 
+ static void __exit ipgre_fini(void)
+@@ -1695,6 +1750,7 @@ static void __exit ipgre_fini(void)
+ 	rtnl_link_unregister(&ipgre_link_ops);
+ 	if (inet_del_protocol(&ipgre_protocol, IPPROTO_GRE) < 0)
+ 		printk(KERN_INFO "ipgre close: can't remove protocol\n");
++	asus_restore_pptp_gre();
+ 	unregister_pernet_device(&ipgre_net_ops);
+ }
+ 
