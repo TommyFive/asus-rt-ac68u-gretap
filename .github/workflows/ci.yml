@@ -73,4 +73,4 @@ jobs:
           ./scripts/package-release.sh ci
           second="$(sha256sum dist/asus-rt-ac68u-gretap-ci.tar.gz | awk '{print $1}')"
           test "$first" = "$second"
-          sha256sum -c dist/asus-rt-ac68u-gretap-ci.tar.gz.sha256
+          (cd dist && sha256sum -c asus-rt-ac68u-gretap-ci.tar.gz.sha256)
