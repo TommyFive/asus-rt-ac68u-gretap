@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Static validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Validate POSIX shell syntax
+        run: git ls-files -z 'scripts/*.sh' | xargs -0 -n1 sh -n
+
+      - name: Parse patch metadata
+        run: |
+          git apply --stat patches/0001-rt-ac68u-gretap-pptp-coexistence-nodf.patch
+          git apply --numstat patches/0001-rt-ac68u-gretap-pptp-coexistence-nodf.patch
+
+      - name: Validate pinned build inputs
+        run: |
+          test -s build-support/kernel.config
+          test -s build-support/sdk.config
+          test -s build-support/Module.symvers
+          grep -q 'MERLIN_COMMIT=6a5df61aab6f3fa2dffc518994d42e4f2a27fb2b' scripts/build.sh
+          grep -q 'TOOLCHAIN_COMMIT=d1af80e6b6686a4edc680386c09a8361453dd5c1' scripts/build.sh
+
+  release-artifact:
+    name: Release artifact verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install module metadata tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq kmod
+
+      - name: Verify tracked release checksum
+        run: (cd release && sha256sum -c SHA256SUMS)
+
+      - name: Verify kernel module metadata
+        run: ./scripts/verify-build.sh
+
+      - name: Verify deterministic release packaging
+        run: |
+          rm -rf dist
+          ./scripts/package-release.sh ci
+          first="$(sha256sum dist/asus-rt-ac68u-gretap-ci.tar.gz | awk '{print $1}')"
+          rm -rf dist
+          ./scripts/package-release.sh ci
+          second="$(sha256sum dist/asus-rt-ac68u-gretap-ci.tar.gz | awk '{print $1}')"
+          test "$first" = "$second"
+          sha256sum -c dist/asus-rt-ac68u-gretap-ci.tar.gz.sha256
